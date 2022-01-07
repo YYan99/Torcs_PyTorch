@@ -1,4 +1,4 @@
-# Using PyTorch and DDPG to play Torcs
+# Using PyTorch and DRL to play Torcs
 
 This code is developed based on DDPG_Torcs (https://github.com/yanpanlau/DDPG-Keras-Torcs), Gym-Torcs (https://raw.githubusercontent.com/ugo-nama-kun/gym_torcs) and DDPG_Torcs_PyTorch (https://github.com/jastfkjg/DDPG_Torcs_PyTorch).
 
