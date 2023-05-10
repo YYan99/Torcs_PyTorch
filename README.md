@@ -15,11 +15,10 @@ The detailed explanation of original TORCS for AI research is given by Daniele L
 ```
 git clone https://github.com/Yan81192/Torcs_PyTorch.git
 cd Torcs_PyTorch
-python test.py
-
+python test_DDPG.py 
+python test_PPO.py
+python test_SAC.py
+python test_TD3.py
 ```
 
-# training
-
-You can train the model both on cpu or gpu.
 
