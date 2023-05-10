@@ -1,10 +1,10 @@
 import os
+from turtle import shape
 import numpy as np
 import math
 import random
 import datetime
 import collections
-import tensorboard
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -14,6 +14,8 @@ from torch.autograd import Variable as V
 from gym_torcs import TorcsEnv
 from tensorboardX import SummaryWriter
 
+########### TAD3 #########
+
 HIDDEN1_UNITS = 300
 HIDDEN2_UNITS = 600
 
@@ -21,16 +23,17 @@ load_model = 0 # load model or not
 train_indicator = 1 # train or not
 test_data = 0 # collect episode data
 
-max_laptime = 300
+TASK = 0 # '1': laptime, '0': lanekeep
+max_laptime = 150 # track3: 300 track2: 200 track1: 150
 
-state_size = 29 # 32 # 50 # 65 # 29
+state_size = 29 # 32 # 29
 action_size = 3
 BUFFER_SIZE = 100000
 BATCH_SIZE = 32
 LRA = 0.0001
 LRC = 0.001
 ep_num = 5000
-ts = int(2e7) 
+ts = int(2e7)
 EXPLORE = 100000
 GAMMA = 0.95 # 0.95
 TAU = 0.001
@@ -47,12 +50,12 @@ past_t = 0
 if (train_indicator):
 
     # model path
-    path = './model/TD3/'+str(datetime.datetime.now())
+    path = './model/TD3P/'+str(datetime.datetime.now())
     os.makedirs(path)
 
 # tensorboard
 if train_indicator or test_data:
-    writer = SummaryWriter('runs/TD3/'+str(datetime.datetime.now()), flush_secs=1)
+    writer = SummaryWriter('runs/TD3P/'+str(datetime.datetime.now()), flush_secs=1)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print('DEVICE:', device)
@@ -96,6 +99,32 @@ class CriticNetwork(nn.Module):
         h2 = h1 + a1
         h3 = F.relu(self.h3(h2))
         out = self.V(h3)
+        return out
+
+class CriticNetworkGRU(nn.Module):
+    def __init__(self, state_size, action_size):
+        super(CriticNetworkGRU, self).__init__()
+        self.w1 = nn.Linear(state_size, HIDDEN1_UNITS)
+        self.a1 = nn.Linear(action_size, HIDDEN2_UNITS)
+        self.h1 = nn.Linear(HIDDEN1_UNITS, HIDDEN2_UNITS)
+        self.h3 = nn.Linear(HIDDEN2_UNITS, HIDDEN2_UNITS)
+        self.V = nn.Linear(HIDDEN1_UNITS, action_size)
+        self.gru = nn.GRU(HIDDEN2_UNITS, HIDDEN1_UNITS, 1, batch_first=True)
+
+    def forward(self, s, a):
+        w1 = F.relu(self.w1(s))
+        a1 = self.a1(a)
+        h1 = self.h1(w1)
+        h2 = h1 + a1
+        # print('H2_1:', h2.shape)
+        # RNN
+        h2 = h2.unsqueeze(0)
+        h2, _ = self.gru(h2) 
+        _, _, c = h2.shape
+        # print('H2_2:', h2.shape)
+
+        # h3 = F.relu(self.h3(h2.view(-1, c)))
+        out = self.V(h2.view(-1, c))
         return out
 
 class ReplayBuffer():
@@ -148,7 +177,7 @@ def test_agent():
     ob, d, ep_len, reward = env.reset(), 0, 0, 0
     o_t = np.hstack((ob.angle, ob.track, ob.trackPos, ob.speedX, ob.speedY, ob.speedZ, ob.wheelSpinVel/100.0, ob.rpm)) # array([angle, track, ...])
 
-    while not (d or (ep_len >= max_laptime)):
+    while not d:
         
         a_t = actor(torch.tensor(o_t.reshape(1, o_t.shape[0]), device=device).float())
         if torch.cuda.is_available():
@@ -159,6 +188,9 @@ def test_agent():
         # Step
         ob, r, d, _ = env.step(a_t)
         o_t2 = np.hstack((ob.angle, ob.track, ob.trackPos, ob.speedX, ob.speedY, ob.speedZ, ob.wheelSpinVel/100.0, ob.rpm)) 
+
+        if TASK and ep_len >= max_laptime:
+            d = 1
 
         reward += r
         ep_len += 1
@@ -171,16 +203,19 @@ def test_agent():
 actor = ActorNetwork(state_size).to(device)
 actor.apply(init_weights)
 critic = CriticNetwork(state_size, action_size).to(device)
-critic2 = CriticNetwork(state_size, action_size).to(device)
+critic1 = CriticNetwork(state_size, action_size).to(device)
+critic2 = CriticNetworkGRU(state_size, action_size).to(device)
 
 if load_model == 1:
     print("loading model")
     try:
-        actor.load_state_dict(torch.load('./model/TD3/actormodel.pth'))
+        actor.load_state_dict(torch.load('./model/TD3P/actormodel.pth'))
         actor.eval()
-        critic.load_state_dict(torch.load('./model/TD3/criticmodel.pth'))
+        critic.load_state_dict(torch.load('./model/TD3P/criticmodel.pth'))
         critic.eval()
-        critic2.load_state_dict(torch.load('./model/TD3/criticmodel2.pth'))
+        critic1.load_state_dict(torch.load('./model/TD3P/criticmodel1.pth'))
+        critic1.eval()
+        critic2.load_state_dict(torch.load('./model/TD3P/criticmodel2.pth'))
         critic2.eval()
         print("model load successfully")
     except:
@@ -190,18 +225,22 @@ buff = ReplayBuffer(BUFFER_SIZE)
 
 target_actor = ActorNetwork(state_size).to(device)
 target_critic = CriticNetwork(state_size, action_size).to(device)
-target_critic2 = CriticNetwork(state_size, action_size).to(device)
+target_critic1 = CriticNetwork(state_size, action_size).to(device)
+target_critic2 = CriticNetworkGRU(state_size, action_size).to(device)
 target_actor.load_state_dict(actor.state_dict())
 target_actor.eval()
 target_critic.load_state_dict(critic.state_dict())
 target_critic.eval()
+target_critic1.load_state_dict(critic1.state_dict())
+target_critic1.eval()
 target_critic2.load_state_dict(critic2.state_dict())
-target_critic2.eval()
+# target_critic2.eval()
 
 criterion_critic = torch.nn.MSELoss(reduction='sum') # loss.sum()
 
 optimizer_actor = torch.optim.Adam(actor.parameters(), lr=LRA)
 optimizer_critic = torch.optim.Adam(critic.parameters(), lr=LRC)
+optimizer_critic1 = torch.optim.Adam(critic1.parameters(), lr=LRC)
 optimizer_critic2 = torch.optim.Adam(critic2.parameters(), lr=LRC)
 
 env = TorcsEnv(vision=VISION, throttle=True, gear_change=False)
@@ -222,6 +261,7 @@ for i in range(ep_num):
     cost_total = 0
     Loss = 0 
     Loss1 = 0 
+    Loss2 = 0
     trackpos_avg = 0
     yaw_avg = 0
     a_max = 0
@@ -231,15 +271,15 @@ for i in range(ep_num):
     else:
         ob = env.reset()
 
-    # s_t = np.hstack((ob.angle, ob.track, ob.trackPos, ob.speedX, ob.speedY, ob.speedZ, ob.aX, ob.aY, ob.aZ, ob.wheelSpinVel/100.0, ob.rpm)) # 1 + 19 + 1 + 3 + (65-29) + 4 + 1 = 29 + 3 = 32
-    s_t = np.hstack((ob.angle, ob.track, ob.trackPos, ob.speedX, ob.speedY, ob.speedZ, ob.wheelSpinVel/100.0, ob.rpm)) # 29
-    # s_t = np.hstack((ob.angle, ob.track, ob.trackPos, ob.speedX, ob.speedY, ob.speedZ, ob.aX, ob.aY, ob.aZ, ob.wheelSpinVel/100.0, ob.rpm, ob.distx, ob.disty, ob.speed_d)) # 1 + 19 + 1 + 3 + 3 + 4 + 1 + 6 + 6 + 6 = 50
+    # s_t = np.hstack((ob.angle, ob.track, ob.trackPos, ob.speedX, ob.speedY, ob.speedZ, ob.aX, ob.aY, ob.aZ, ob.wheelSpinVel/100.0, ob.rpm)) 
+    s_t = np.hstack((ob.angle, ob.track, ob.trackPos, ob.speedX, ob.speedY, ob.speedZ, ob.wheelSpinVel/100.0, ob.rpm)) 
 
     for j in range(ts):
 
         # Init parameters
         loss = 0
         loss1 = 0
+        loss2 = 0
         epsilon -= 1.0 / EXPLORE
         a_t = np.zeros([action_size])
         noise_t = np.zeros([action_size])
@@ -272,17 +312,15 @@ for i in range(ep_num):
         # Step
         ob, r_t, done, cost = env.step(a_t) # a_t[0]: steer, acc, brake
 
-        # s_t1 = np.hstack((ob.angle, ob.track, ob.trackPos, ob.speedX, ob.speedY, ob.speedZ, ob.aX, ob.aY, ob.aZ, ob.wheelSpinVel/100.0, ob.rpm)) # 32
-        s_t1 = np.hstack((ob.angle, ob.track, ob.trackPos, ob.speedX, ob.speedY, ob.speedZ, ob.wheelSpinVel/100.0, ob.rpm)) # 29
-        # s_t1 = np.hstack((ob.angle, ob.track, ob.trackPos, ob.speedX, ob.speedY, ob.speedZ, ob.aX, ob.aY, ob.aZ, ob.wheelSpinVel/100.0, ob.rpm, ob.distx, ob.disty, ob.speed_d))
+        # s_t1 = np.hstack((ob.angle, ob.track, ob.trackPos, ob.speedX, ob.speedY, ob.speedZ, ob.aX, ob.aY, ob.aZ, ob.wheelSpinVel/100.0, ob.rpm)) 
+        s_t1 = np.hstack((ob.angle, ob.track, ob.trackPos, ob.speedX, ob.speedY, ob.speedZ, ob.wheelSpinVel/100.0, ob.rpm)) 
 
         # Laptime Task reward
-        if j + 1 >= max_laptime:
+        if TASK and j + 1 >= max_laptime:
             done = 1
             if laptime > 0:
                 r_t = 500
-            
-        # Senor data
+
         laptime = ob.lastLapTime
         trackpos = ob.trackPos
         yaw = ob.angle
@@ -315,7 +353,7 @@ for i in range(ep_num):
             writer.add_scalar('distRaced/distRaced_'+str(i), distRaced, global_step=j)
             writer.add_scalar('racePos/racePos_'+str(i), racePos, global_step=j)
 
-        # Add to replay buffer
+        # add to replay buffer
         buff.add(s_t, a_t, r_t, s_t1, done)
 
         # End of trajectory handling
@@ -331,8 +369,9 @@ for i in range(ep_num):
 
         # Update
         if train_indicator:
-
+           
             batch = buff.getBatch(BATCH_SIZE)
+
             states = torch.tensor(np.asarray([e[0] for e in batch]), device=device).float()
             actions = torch.tensor(np.asarray([e[1] for e in batch]), device=device).float()
             rewards = torch.tensor(np.asarray([e[2] for e in batch]), device=device).float()
@@ -347,13 +386,14 @@ for i in range(ep_num):
             
             # use target network to calculate target_q_value
             target_q_values = target_critic(new_states, next_actions) # q(s_j+1, a^_j+1; omega^-), a^_j+1 = mu(s_j+1; theta^-)
-            target_q_values1 = target_critic2(new_states, next_actions) 
-            
+            target_q_values1 = target_critic1(new_states, next_actions) 
+            target_q_values2 = target_critic2(new_states, next_actions)
+            #print('Q1:', target_q_values, ', Q2:', target_q_values1, ', min:', torch.min(target_q_values, target_q_values1))
             for k in range(len(batch)):
                 if dones[k]:
                     y_t[k] = rewards[k]
                 else:
-                    y_t[k] = rewards[k] + GAMMA * torch.min(target_q_values[k], target_q_values1[k])
+                    y_t[k] = rewards[k] + GAMMA * torch.min(torch.min(target_q_values[k], target_q_values1[k]), target_q_values2[k])
 
             # update critic network
             q_values = critic(states, actions)
@@ -361,6 +401,12 @@ for i in range(ep_num):
             optimizer_critic.zero_grad()
             loss.backward(retain_graph=True)
             optimizer_critic.step() # update parameters
+
+            q_values1 = critic1(states, actions)
+            loss1 = criterion_critic(y_t, q_values1)
+            optimizer_critic1.zero_grad()
+            loss1.backward(retain_graph=True)
+            optimizer_critic1.step() # update parameters
 
             q_values2 = critic2(states, actions)
             loss2 = criterion_critic(y_t, q_values2)
@@ -370,16 +416,26 @@ for i in range(ep_num):
 
             if j % policy_delay == 0:
 
+                a_for_grad = actor(states)
+                a_for_grad.requires_grad_() # change require_grad False=>True, calculate gradiant automatically
+                q_values_for_grad = critic(states, a_for_grad)
+                critic.zero_grad()
+                q_sum = q_values_for_grad.sum()
+                q_sum.backward(retain_graph=True)
+
+                grads = torch.autograd.grad(q_sum, a_for_grad) 
+
+                # update actor network
                 act = actor(states)
-                actor_loss = -critic(states, act).mean()
-                optimizer_actor.zero_grad()
-                actor_loss.backward()
+                actor.zero_grad()
+                act.backward(-grads[0])
                 optimizer_actor.step()
 
                 new_actor_state_dict = collections.OrderedDict()
                 new_critic_state_dict = collections.OrderedDict()
+                new_critic1_state_dict = collections.OrderedDict()
                 new_critic2_state_dict = collections.OrderedDict()
-                
+
                 for var_name in target_actor.state_dict():
                     new_actor_state_dict[var_name] = TAU * actor.state_dict()[var_name] + (1-TAU) * target_actor.state_dict()[var_name]
                 target_actor.load_state_dict(new_actor_state_dict)
@@ -388,13 +444,17 @@ for i in range(ep_num):
                     new_critic_state_dict[var_name] = TAU * critic.state_dict()[var_name] + (1-TAU) * target_critic.state_dict()[var_name]
                 target_critic.load_state_dict(new_critic_state_dict)
 
+                for var_name in target_critic1.state_dict():
+                    new_critic1_state_dict[var_name] = TAU * critic1.state_dict()[var_name] + (1-TAU) * target_critic1.state_dict()[var_name]
+                target_critic1.load_state_dict(new_critic1_state_dict)
+
                 for var_name in target_critic2.state_dict():
                     new_critic2_state_dict[var_name] = TAU * critic2.state_dict()[var_name] + (1-TAU) * target_critic2.state_dict()[var_name]
                 target_critic2.load_state_dict(new_critic2_state_dict)
-
-        cost_total += cost
-        Loss = Loss + loss
-        Loss1 = Loss1 + loss1
+       
+        Loss += loss
+        Loss1 += loss1
+        Loss2 += loss2
 
     if train_indicator and (reward > 10000 or laptime > 0):
         test_reward, test_timestep, test_laptime = test_agent()
@@ -404,18 +464,23 @@ for i in range(ep_num):
             print("Saving Model")
             torch.save(actor.state_dict(), path+'/actormodel_'+str(i)+'_r='+str(test_reward)+'.pth')
             torch.save(critic.state_dict(), path+'/criticmodel_'+str(i)+'_r='+str(test_reward)+'.pth')
+            torch.save(critic1.state_dict(), path+'/criticmodel1_'+str(i)+'_r='+str(test_reward)+'.pth')
             torch.save(critic2.state_dict(), path+'/criticmodel2_'+str(i)+'_r='+str(test_reward)+'.pth')
             old_reward = test_reward
         if 0 < test_laptime < old_laptime:
             print("Saving Model")
             torch.save(actor.state_dict(), path+'/actormodel_'+str(i)+'_l='+str(test_laptime)+'.pth')
             torch.save(critic.state_dict(), path+'/criticmodel_'+str(i)+'_l='+str(test_laptime)+'.pth')
+            torch.save(critic1.state_dict(), path+'/criticmodel1_'+str(i)+'_r='+str(test_reward)+'.pth')
             torch.save(critic2.state_dict(), path+'/criticmodel2_'+str(i)+'_l='+str(test_laptime)+'.pth')
             old_laptime = test_laptime
         # save last model
         torch.save(actor.state_dict(), path+'/actormodel.pth')
         torch.save(critic.state_dict(), path+'/criticmodel.pth')
+        torch.save(critic1.state_dict(), path+'/criticmodel1.pth')
         torch.save(critic2.state_dict(), path+'/criticmodel2.pth')
+
+
 
     print('-------------------------------------',
             " \nEpisode: ".ljust(20),     i, 
@@ -428,7 +493,6 @@ for i in range(ep_num):
             " \nTest Reward:".ljust(20),  "%.2f" % test_reward, 
             " \nTest Timestep:".ljust(20),   test_timestep, 
            '\n-------------------------------------' )
-
 
     if train_indicator:
         writer.add_scalar('Reward', reward, global_step=i)
@@ -444,6 +508,7 @@ for i in range(ep_num):
         writer.add_scalar('Test_Reward', test_reward, global_step=i)
         writer.add_scalar('Test_Laptime', test_laptime, global_step=i)
         writer.add_scalar('Test_Timestep', test_timestep, global_step=i)
+
 
 env.end()
 print("Finish.")
