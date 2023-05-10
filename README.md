@@ -19,6 +19,8 @@ python test_DDPG.py
 python test_PPO.py
 python test_SAC.py
 python test_TD3.py
+python test_LSTM_TD3.py # LSTM_TD3
+python test_TD3P.py # TAD3
 ```
 
 
