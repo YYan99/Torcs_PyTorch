@@ -13,7 +13,7 @@ The detailed explanation of original TORCS for AI research is given by Daniele L
 # How to Run?
 
 ```
-git clone https://github.com/Yan81192/Torcs_PyTorch.git
+git clone https://github.com/YYan99/Torcs_PyTorch.git
 cd Torcs_PyTorch
 python test_DDPG.py 
 python test_PPO.py
